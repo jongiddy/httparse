@@ -148,7 +148,7 @@ pub(crate) fn is_header_value_token(b: u8) -> bool {
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Error {
     /// Invalid byte in header name.
-    HeaderName,
+    HeaderName(&'static str),
     /// Invalid byte in header value.
     HeaderValue,
     /// Invalid byte in new line.
@@ -167,7 +167,7 @@ impl Error {
     #[inline]
     fn description_str(&self) -> &'static str {
         match *self {
-            Error::HeaderName => "invalid header name",
+            Error::HeaderName(s) => s,
             Error::HeaderValue => "invalid header value",
             Error::NewLine => "invalid new line",
             Error::Status => "invalid response status",
@@ -1118,23 +1118,23 @@ fn parse_headers_iter_uninit<'a>(
         // is false, otherwise find the end of the current line and resume
         // parsing on the next one.
         macro_rules! handle_invalid_char {
-            ($bytes:ident, $b:ident, $err:ident) => {
+            ($bytes:ident, $b:ident, $err:expr) => {
                 if !config.ignore_invalid_headers {
-                    return Err(Error::$err);
+                    return Err($err);
                 }
 
                 let mut b = $b;
 
                 loop {
                     if b == b'\r' {
-                        expect!(bytes.next() == b'\n' => Err(Error::$err));
+                        expect!(bytes.next() == b'\n' => Err($err));
                         break;
                     }
                     if b == b'\n' {
                         break;
                     }
                     if b == b'\0' {
-                        return Err(Error::$err);
+                        return Err($err);
                     }
                     b = next!($bytes);
                 }
@@ -1174,7 +1174,7 @@ fn parse_headers_iter_uninit<'a>(
                 bytes.slice();
                 continue 'headers;
             } else {
-                handle_invalid_char!(bytes, b, HeaderName);
+                handle_invalid_char!(bytes, b, Error::HeaderName(b.escape_ascii().to_string().leak()));
             }
         }
 
@@ -1205,7 +1205,7 @@ fn parse_headers_iter_uninit<'a>(
                 }
             }
 
-            handle_invalid_char!(bytes, b, HeaderName);
+            handle_invalid_char!(bytes, b, Error::HeaderName(format!("{name:?}").leak()));
         };
 
         let mut b;
@@ -1227,7 +1227,7 @@ fn parse_headers_iter_uninit<'a>(
                 if b == b'\r' {
                     expect!(bytes.next() == b'\n' => Err(Error::HeaderValue));
                 } else if b != b'\n' {
-                    handle_invalid_char!(bytes, b, HeaderValue);
+                    handle_invalid_char!(bytes, b, Error::HeaderValue);
                 }
 
                 maybe_continue_after_obsolete_line_folding!(bytes, 'whitespace_after_colon);
@@ -1254,7 +1254,7 @@ fn parse_headers_iter_uninit<'a>(
                 } else if b == b'\n' {
                     1
                 } else {
-                    handle_invalid_char!(bytes, b, HeaderValue);
+                    handle_invalid_char!(bytes, b, Error::HeaderValue);
                 };
 
                 maybe_continue_after_obsolete_line_folding!(bytes, 'value_lines);
@@ -1794,7 +1794,7 @@ mod tests {
         let mut response = Response::new(&mut headers[..]);
         let result = response.parse(RESPONSE_WITH_WHITESPACE_BETWEEN_HEADER_NAME_AND_COLON);
 
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName("\"Access-Control-Allow-Credentials\"")));
     }
 
     #[test]
@@ -1842,7 +1842,7 @@ mod tests {
         let mut request = Request::new(&mut headers[..]);
         let result = request.parse(REQUEST_WITH_WHITESPACE_BETWEEN_HEADER_NAME_AND_COLON);
 
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName("\"Host\"")));
     }
 
     #[test]
@@ -1865,7 +1865,7 @@ mod tests {
         let mut response = Response::new(&mut headers[..]);
         let result = response.parse(RESPONSE_WITH_OBSOLETE_LINE_FOLDING_AT_START);
 
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName(" ")));
     }
 
     #[test]
@@ -1894,7 +1894,7 @@ mod tests {
         let mut response = Response::new(&mut headers[..]);
         let result = response.parse(RESPONSE_WITH_OBSOLETE_LINE_FOLDING_AT_END);
 
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName(" ")));
     }
 
     #[test]
@@ -1923,7 +1923,7 @@ mod tests {
         let mut response = Response::new(&mut headers[..]);
         let result = response.parse(RESPONSE_WITH_OBSOLETE_LINE_FOLDING_IN_MIDDLE);
 
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName(" ")));
     }
 
     #[test]
@@ -1952,7 +1952,7 @@ mod tests {
         let mut response = Response::new(&mut headers[..]);
         let result = response.parse(RESPONSE_WITH_OBSOLETE_LINE_FOLDING_IN_EMPTY_HEADER);
 
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName(" ")));
     }
 
     #[test]
@@ -2127,7 +2127,7 @@ mod tests {
         let result = crate::ParserConfig::default()
             .allow_spaces_after_header_name_in_responses(true)
             .parse_response(&mut response, RESPONSE);
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName(":")));
 
         let result = crate::ParserConfig::default()
             .ignore_invalid_headers_in_responses(true)
@@ -2152,7 +2152,7 @@ mod tests {
 
         let result = crate::ParserConfig::default()
             .parse_request(&mut request, RESPONSE);
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName(":")));
 
         let result = crate::ParserConfig::default()
             .ignore_invalid_headers_in_requests(true)
@@ -2171,13 +2171,13 @@ mod tests {
         let result = crate::ParserConfig::default()
             .allow_spaces_after_header_name_in_responses(true)
             .parse_request(&mut request, REQUEST);
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName("\"Access-Control-Allow-Credentials\"")));
 
         let result = crate::ParserConfig::default()
 
             .ignore_invalid_headers_in_responses(true)
             .parse_request(&mut request, REQUEST);
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName("\"Access-Control-Allow-Credentials\"")));
     }
 
     #[test]
@@ -2191,7 +2191,7 @@ mod tests {
         let result = crate::ParserConfig::default()
             .allow_spaces_after_header_name_in_responses(true)
             .parse_response(&mut response, RESPONSE);
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName("\"Access-Control-Allow-Credentials\"")));
 
         let result = crate::ParserConfig::default()
             .ignore_invalid_headers_in_responses(true)
@@ -2216,7 +2216,7 @@ mod tests {
 
         let result = crate::ParserConfig::default()
             .parse_request(&mut request, REQUEST);
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName("\"Access-Control-Allow-Credentials\"")));
 
         let result = crate::ParserConfig::default()
             .ignore_invalid_headers_in_requests(true)
@@ -2234,7 +2234,7 @@ mod tests {
 
         let result = crate::ParserConfig::default()
             .parse_response(&mut response, RESPONSE);
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName("\"Access-Control-Allow-Credentials\"")));
 
         let result = crate::ParserConfig::default()
             .ignore_invalid_headers_in_responses(true)
@@ -2259,7 +2259,7 @@ mod tests {
 
         let result = crate::ParserConfig::default()
             .parse_request(&mut request, REQUEST);
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName("\"Access-Control-Allow-Credentials\"")));
 
         let result = crate::ParserConfig::default()
             .ignore_invalid_headers_in_requests(true)
@@ -2279,7 +2279,7 @@ mod tests {
             .allow_obsolete_multiline_headers_in_responses(true)
             .allow_spaces_after_header_name_in_responses(true)
             .parse_response(&mut response, RESPONSE);
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName("\"Access-Control-Allow-Credentials\"")));
 
         let result = crate::ParserConfig::default()
             .ignore_invalid_headers_in_responses(true)
@@ -2304,7 +2304,7 @@ mod tests {
 
         let result = crate::ParserConfig::default()
             .parse_request(&mut request, REQUEST);
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName("\"Access-Control-Allow-Credentials\"")));
 
         let result = crate::ParserConfig::default()
             .ignore_invalid_headers_in_requests(true)
@@ -2322,12 +2322,12 @@ mod tests {
 
         let result = crate::ParserConfig::default()
             .parse_response(&mut response, RESPONSE);
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName("\"Access-Control-Allow-Cred\"")));
 
         let result = crate::ParserConfig::default()
             .ignore_invalid_headers_in_responses(true)
             .parse_response(&mut response, RESPONSE);
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName("\"Access-Control-Allow-Cred\"")));
     }
 
     #[test]
@@ -2340,12 +2340,12 @@ mod tests {
 
         let result = crate::ParserConfig::default()
             .parse_request(&mut request, REQUEST);
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName("\"Access-Control-Allow-Cred\"")));
 
         let result = crate::ParserConfig::default()
             .ignore_invalid_headers_in_requests(true)
             .parse_request(&mut request, REQUEST);
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName("\"Access-Control-Allow-Cred\"")));
     }
 
     #[test]
@@ -2358,12 +2358,12 @@ mod tests {
 
         let result = crate::ParserConfig::default()
             .parse_response(&mut response, RESPONSE);
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName("\"Access-Control-Allow-Cred\"")));
 
         let result = crate::ParserConfig::default()
             .ignore_invalid_headers_in_responses(true)
             .parse_response(&mut response, RESPONSE);
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName("\"Access-Control-Allow-Cred\"")));
 
         const REQUEST: &[u8] =
             b"GET / HTTP/1.1\r\nAccess-Control-Allow-Cred\rentials: hello\r\nBread: baguette\r\n\r\n";
@@ -2373,12 +2373,12 @@ mod tests {
 
         let result = crate::ParserConfig::default()
             .parse_request(&mut request, REQUEST);
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName("\"Access-Control-Allow-Cred\"")));
 
         let result = crate::ParserConfig::default()
             .ignore_invalid_headers_in_requests(true)
             .parse_request(&mut request, REQUEST);
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName("\"Access-Control-Allow-Cred\"")));
     }
 
     #[test]
@@ -2392,13 +2392,13 @@ mod tests {
         let result = crate::ParserConfig::default()
             .allow_spaces_after_header_name_in_responses(true)
             .parse_response(&mut response, RESPONSE);
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName("\"Access-Control-Allow-Credentials\"")));
 
         let result = crate::ParserConfig::default()
             .allow_spaces_after_header_name_in_responses(true)
             .ignore_invalid_headers_in_responses(true)
             .parse_response(&mut response, RESPONSE);
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName("\"Access-Control-Allow-Credentials\"")));
 
         const REQUEST: &[u8] =
             b"GET / HTTP/1.1\r\nAccess-Control-Allow-Credentials   \0: hello\r\nBread: baguette\r\n\r\n";
@@ -2409,7 +2409,7 @@ mod tests {
         let result = crate::ParserConfig::default()
             .ignore_invalid_headers_in_requests(true)
             .parse_request(&mut request, REQUEST);
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName("\"Access-Control-Allow-Credentials\"")));
     }
 
     #[test]
@@ -2567,7 +2567,7 @@ mod tests {
         let mut response = Response::new(&mut headers[..]);
         let result = response.parse(RESPONSE_WITH_SPACE_BEFORE_FIRST_HEADER);
 
-        assert_eq!(result, Err(crate::Error::HeaderName));
+        assert_eq!(result, Err(crate::Error::HeaderName(" ")));
     }
 
     #[test]
